@@ -34,8 +34,12 @@ except ImportError:
 # Configuration: OpenAI client will be initialized when needed
 client = None
 
-def _get_openai_client():
-    """Initialize OpenAI client with proper error handling."""
+def _get_openai_client(config=None):
+    """Initialize OpenAI client with proper error handling.
+    
+    Args:
+        config: Optional config dict that may contain 'api_base_url'
+    """
     global client
     if client is None:
         api_key = os.getenv("OPENAI_API_KEY")
@@ -49,17 +53,31 @@ def _get_openai_client():
                 "Alternatively, you can use the --dry-run flag to see conflicts without AI resolution."
             )
         
+        # 支持自定义API地址（用于国内代理中转）
+        # 优先使用配置文件中的api_base_url，其次使用环境变量，最后使用默认值
+        if config and config.get('api_base_url'):
+            api_base_url = config['api_base_url']
+        else:
+            api_base_url = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+        
+        # 确保URL格式正确
+        if not api_base_url.endswith('/v1'):
+            if api_base_url.endswith('/'):
+                api_base_url = api_base_url + 'v1'
+            else:
+                api_base_url = api_base_url + '/v1'
+        
         # Handle test environment - if API key is a dummy test value, create a mock-compatible client
         if api_key in ['test-api-key', 'dummy-key', 'fake-key'] or api_key.startswith('test-'):
             try:
                 # Try to create client anyway, but catch authentication errors gracefully
-                client = OpenAI(api_key=api_key)
+                client = OpenAI(api_key=api_key, base_url=api_base_url)
             except Exception:
                 # If OpenAI client creation fails with test key, that's expected
                 # The actual API calls will be mocked in tests
-                client = OpenAI(api_key=api_key)
+                client = OpenAI(api_key=api_key, base_url=api_base_url)
         else:
-            client = OpenAI(api_key=api_key)
+            client = OpenAI(api_key=api_key, base_url=api_base_url)
     return client
 
 
@@ -129,7 +147,8 @@ def load_config(repo_path="."):
         'branch_preference': None,
         'temperature': 0,
         'timeout': 30,
-        'preserve_whitespace': True
+        'preserve_whitespace': True,
+        'api_base_url': None  # 默认使用环境变量或OpenAI官方地址
     }
     
     if not config_path.exists():
@@ -227,7 +246,7 @@ def parse_conflicts(conflict_blobs, repo_path="."):
     return conflicts
 
 
-def resolve_conflict_sections_batch(sections, model="gpt-4", max_batch_size=5):
+def resolve_conflict_sections_batch(sections, model="gpt-4", max_batch_size=5, config=None):
     """
     Resolves multiple conflict sections efficiently using batching.
     
@@ -235,6 +254,7 @@ def resolve_conflict_sections_batch(sections, model="gpt-4", max_batch_size=5):
         sections: List of conflict section strings to resolve
         model: LLM model to use for resolution
         max_batch_size: Maximum number of conflicts to resolve in one API call
+        config: Optional config dict that may contain 'api_base_url'
         
     Returns:
         List of resolved sections in the same order as input
@@ -260,19 +280,20 @@ def resolve_conflict_sections_batch(sections, model="gpt-4", max_batch_size=5):
             }
         )
         
-        batch_resolutions = _resolve_batch(batch, model)
+        batch_resolutions = _resolve_batch(batch, model, config)
         all_resolutions.extend(batch_resolutions)
     
     return all_resolutions
 
 
-def resolve_conflict_section_single(section, model="gpt-4"):
+def resolve_conflict_section_single(section, model="gpt-4", config=None):
     """
     Resolves a single conflict section using the OpenAI API.
     
     Args:
         section: The conflict section string including <<<<<<< HEAD, =======, >>>>>>> markers
         model: The OpenAI model to use for resolution
+        config: Optional config dict that may contain 'api_base_url'
         
     Returns:
         The resolved code section without conflict markers
@@ -286,7 +307,7 @@ def resolve_conflict_section_single(section, model="gpt-4"):
     )
     
     try:
-        client = _get_openai_client()
+        client = _get_openai_client(config)
         
         prompt = f"""Please resolve this Git merge conflict by providing clean, working code without any conflict markers.
 
@@ -341,13 +362,14 @@ Please respond with ONLY the resolved code, no explanations or markdown formatti
         return section
 
 
-def _resolve_batch(sections, model="gpt-4"):
+def _resolve_batch(sections, model="gpt-4", config=None):
     """
     Internal function to resolve a batch of conflict sections in a single API call.
     
     Args:
         sections: List of conflict sections to resolve
         model: LLM model to use
+        config: Optional config dict that may contain 'api_base_url'
         
     Returns:
         List of resolved sections
@@ -361,7 +383,7 @@ def _resolve_batch(sections, model="gpt-4"):
     )
     
     try:
-        client = _get_openai_client()
+        client = _get_openai_client(config)
         
         # Create batch prompt with clear separators
         batch_prompt = """Please resolve these Git merge conflicts by providing clean, working code without any conflict markers.
@@ -428,7 +450,7 @@ Here are the conflicts to resolve:
             }
         )
         # Fallback to individual resolution
-        return [resolve_conflict_section_single(section, model) for section in sections]
+        return [resolve_conflict_section_single(section, model, config) for section in sections]
 
 
 def _parse_batch_response(response_text, expected_count):
@@ -485,12 +507,12 @@ def _parse_batch_response(response_text, expected_count):
 
 
 # Backward compatibility alias
-def resolve_conflict_section(section, model="gpt-4"):
+def resolve_conflict_section(section, model="gpt-4", config=None):
     """
     Legacy function for resolving a single conflict section.
     Maintained for backward compatibility.
     """
-    return resolve_conflict_section_single(section, model)
+    return resolve_conflict_section_single(section, model, config)
 
 
 def apply_resolutions(path, original_content, resolved_map):
@@ -856,7 +878,8 @@ def main():
                 resolved_sections = resolve_conflict_sections_batch(
                     sections, 
                     model=model, 
-                    max_batch_size=max_batch_size
+                    max_batch_size=max_batch_size,
+                    config=config
                 )
                 resolved_map = dict(zip(sections, resolved_sections))
             except Exception as e:
@@ -868,7 +891,7 @@ def main():
                 resolved_map = {}
                 for sec in sections:
                     logger.debug(f"Resolving individual conflict...")
-                    merged = resolve_conflict_section(sec, model=model)
+                    merged = resolve_conflict_section(sec, model=model, config=config)
                     resolved_map[sec] = merged
 
             apply_resolutions(full_path, content, resolved_map)
