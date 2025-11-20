@@ -339,6 +339,507 @@ def extract_conflict_core(conflict_section):
     return '\n'.join(core_lines).strip()
 
 
+def extract_indent_from_conflict(conflict_section):
+    """
+    从冲突块中提取第一行实际代码的缩进
+    返回：缩进字符串（空格或tab）
+    """
+    lines = conflict_section.split('\n')
+    
+    for line in lines:
+        stripped = line.strip()
+        # 跳过冲突标记行
+        if stripped.startswith('<<<<<<<') or stripped.startswith('=======') or stripped.startswith('>>>>>>>'):
+            continue
+        # 找到第一行非空代码行
+        if stripped:
+            # 提取前导空白
+            indent = line[:len(line) - len(line.lstrip())]
+            return indent
+    
+    # 如果没有找到代码行，返回空字符串
+    return ""
+
+
+def check_conflict_lines_same_indent_level(conflict_section):
+    """
+    检查冲突块中所有代码行的缩进是否都是同一级别
+    返回：(是否同一级别, 第一行缩进)
+    """
+    lines = conflict_section.split('\n')
+    code_indents = []
+    first_indent = None
+    
+    for line in lines:
+        stripped = line.strip()
+        # 跳过冲突标记行
+        if stripped.startswith('<<<<<<<') or stripped.startswith('=======') or stripped.startswith('>>>>>>>'):
+            continue
+        # 跳过空行
+        if not stripped:
+            continue
+        
+        # 提取缩进
+        indent = line[:len(line) - len(line.lstrip())]
+        code_indents.append(indent)
+        
+        if first_indent is None:
+            first_indent = indent
+    
+    if not code_indents or first_indent is None:
+        return True, first_indent or ""
+    
+    # 检查所有行的缩进是否相同
+    all_same = all(indent == first_indent for indent in code_indents)
+    
+    return all_same, first_indent
+
+
+def extract_conflict_line_indents(conflict_section):
+    """
+    从冲突块中提取所有代码行的缩进
+    返回：列表，每个元素是(行号, 缩进字符串)
+    """
+    lines = conflict_section.split('\n')
+    line_indents = []
+    
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        # 跳过冲突标记行
+        if stripped.startswith('<<<<<<<') or stripped.startswith('=======') or stripped.startswith('>>>>>>>'):
+            continue
+        # 跳过空行
+        if not stripped:
+            continue
+        
+        # 提取缩进
+        indent = line[:len(line) - len(line.lstrip())]
+        line_indents.append((idx, indent))
+    
+    return line_indents
+
+
+def extract_indent_from_context(original_content, conflict_start, conflict_end):
+    """
+    从冲突块前后的上下文提取缩进信息
+    返回：(基础缩进字符串, 缩进单位, 缩进字符)
+    """
+    lines = original_content.split('\n')
+    conflict_start_line = original_content[:conflict_start].count('\n')
+    conflict_end_line = original_content[:conflict_end].count('\n')
+    
+    # 查找冲突前的代码行（最多往前看10行）
+    base_indent = ""
+    for i in range(max(0, conflict_start_line - 1), max(0, conflict_start_line - 10), -1):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped and not stripped.startswith('<<<<<<<') and not stripped.startswith('=======') and not stripped.startswith('>>>>>>>'):
+            # 找到冲突前的代码行
+            base_indent = line[:len(line) - len(line.lstrip())]
+            break
+    
+    # 如果没找到，查找冲突后的代码行
+    if not base_indent:
+        for i in range(conflict_end_line, min(len(lines), conflict_end_line + 10)):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped and not stripped.startswith('<<<<<<<') and not stripped.startswith('=======') and not stripped.startswith('>>>>>>>'):
+                base_indent = line[:len(line) - len(line.lstrip())]
+                break
+    
+    # 从冲突块内部提取缩进作为备选
+    if not base_indent:
+        base_indent = extract_indent_from_conflict(original_content[conflict_start:conflict_end])
+    
+    # 确定缩进单位（通常是2或4个空格，或1个tab）
+    if base_indent:
+        if base_indent.startswith('\t'):
+            indent_unit = '\t'
+            indent_size = 1
+        else:
+            # 计算空格数量，找出最常见的缩进单位
+            spaces = len(base_indent)
+            # 尝试2、4、8等常见缩进单位
+            for unit in [2, 4, 8]:
+                if spaces % unit == 0:
+                    indent_unit = ' ' * unit
+                    indent_size = unit
+                    break
+            else:
+                indent_unit = ' ' * 4  # 默认4个空格
+                indent_size = 4
+    else:
+        indent_unit = ' ' * 4  # 默认4个空格
+        indent_size = 4
+    
+    return base_indent, indent_unit, indent_size
+
+
+def normalize_indent_to_target(resolved_code, target_indent, indent_unit, indent_size, preserve_relative_indent=True, conflict_line_indents=None):
+    """
+    将解析后的代码缩进调整为与目标缩进一致
+    如果preserve_relative_indent为False，所有行都使用相同的目标缩进
+    如果preserve_relative_indent为True，保持代码内部的相对缩进关系
+    如果提供了conflict_line_indents，使用原始冲突块的缩进级别
+    """
+    if not resolved_code:
+        return resolved_code
+    
+    lines = resolved_code.split('\n')
+    if not lines:
+        return resolved_code
+    
+    # 如果没有目标缩进，使用默认值（4个空格）
+    if not target_indent:
+        target_indent = '    '  # 4个空格
+        indent_unit = '    '
+        indent_size = 4
+    
+    # 如果不需要保持相对缩进，所有行都使用目标缩进
+    if not preserve_relative_indent:
+        adjusted_lines = []
+        for line in lines:
+            if not line.strip():
+                # 空行保持原样
+                adjusted_lines.append(line)
+            else:
+                # 所有行都使用目标缩进
+                adjusted_lines.append(target_indent + line.lstrip())
+        return '\n'.join(adjusted_lines)
+    
+    # 如果提供了原始冲突块的缩进信息，使用它来调整
+    if conflict_line_indents and len(conflict_line_indents) > 0:
+        # 找到第一行的缩进作为基准
+        first_conflict_indent = conflict_line_indents[0][1]
+        
+        # 计算第一行缩进相对于目标缩进的级别
+        # 将第一行缩进转换为缩进级别（相对于缩进单位）
+        # 注意：需要统一转换为相同的单位来计算相对缩进
+        if indent_unit == '\t':
+            # 目标缩进是tab，需要将原始冲突块的空格缩进转换为tab级别
+            # 假设1个tab = indent_size个空格
+            first_level = first_conflict_indent.count('\t')
+            first_level += len(first_conflict_indent.replace('\t', '')) // indent_size if indent_size > 0 else 0
+        else:
+            # 目标缩进是空格，直接计算
+            first_level = len(first_conflict_indent) // indent_size if indent_size > 0 else 0
+        
+        # 计算目标缩进的级别
+        if indent_unit == '\t':
+            target_level = target_indent.count('\t')
+            target_level += len(target_indent.replace('\t', '')) // indent_size if indent_size > 0 else 0
+        else:
+            target_level = len(target_indent) // indent_size if indent_size > 0 else 0
+        
+        # 计算偏移量
+        offset = target_level - first_level
+        
+        # 调整所有行的缩进
+        adjusted_lines = []
+        code_line_idx = 0
+        for line in lines:
+            if not line.strip():
+                # 空行保持原样
+                adjusted_lines.append(line)
+                continue
+            
+            # 获取对应的原始冲突块行的缩进
+            if code_line_idx < len(conflict_line_indents):
+                conflict_indent = conflict_line_indents[code_line_idx][1]
+                
+                # 计算原始冲突块行的缩进级别（相对于第一行的相对级别）
+                if indent_unit == '\t':
+                    # 目标缩进是tab，需要将原始冲突块的空格缩进转换为tab级别
+                    conflict_level = conflict_indent.count('\t')
+                    conflict_level += len(conflict_indent.replace('\t', '')) // indent_size if indent_size > 0 else 0
+                else:
+                    # 目标缩进是空格，直接计算
+                    conflict_level = len(conflict_indent) // indent_size if indent_size > 0 else 0
+                
+                # 计算相对于第一行的缩进级别差
+                relative_level = conflict_level - first_level
+                
+                # 计算新的缩进级别 = 目标级别 + 相对级别
+                new_level = target_level + relative_level
+                new_level = max(0, new_level)
+                
+                # 生成新的缩进
+                new_indent = indent_unit * new_level
+            else:
+                # 如果AI返回的行数多于原始冲突块，使用最后一行缩进
+                if conflict_line_indents:
+                    last_conflict_indent = conflict_line_indents[-1][1]
+                    if indent_unit == '\t':
+                        last_level = last_conflict_indent.count('\t')
+                        last_level += len(last_conflict_indent.replace('\t', '')) // indent_size if indent_size > 0 else 0
+                    else:
+                        last_level = len(last_conflict_indent) // indent_size if indent_size > 0 else 0
+                    relative_level = last_level - first_level
+                    new_level = target_level + relative_level
+                    new_level = max(0, new_level)
+                    new_indent = indent_unit * new_level
+                else:
+                    new_indent = target_indent
+            
+            adjusted_lines.append(new_indent + line.lstrip())
+            code_line_idx += 1
+        
+        return '\n'.join(adjusted_lines)
+    
+    # 否则，使用原来的逻辑：找到所有代码行的最小缩进（作为归一化基准）
+    min_indent = None
+    code_line_indents = []
+    
+    for line in lines:
+        if not line.strip():
+            # 空行跳过
+            code_line_indents.append(None)
+            continue
+        
+        current_indent = line[:len(line) - len(line.lstrip())]
+        code_line_indents.append(current_indent)
+        
+        # 更新最小缩进
+        if min_indent is None or len(current_indent) < len(min_indent):
+            min_indent = current_indent
+    
+    # 如果没有找到代码行，直接返回
+    if min_indent is None:
+        return resolved_code
+    
+    # 调整所有行的缩进
+    adjusted_lines = []
+    for idx, line in enumerate(lines):
+        if not line.strip():
+            # 空行保持原样
+            adjusted_lines.append(line)
+            continue
+        
+        # 获取当前行的原始缩进
+        original_indent = code_line_indents[idx]
+        
+        # 计算相对缩进（当前行相对于最小缩进的偏移）
+        # 如果当前行缩进长度大于等于最小缩进长度，计算差值
+        if len(original_indent) >= len(min_indent):
+            relative_indent = original_indent[len(min_indent):]
+        else:
+            # 如果当前行缩进小于最小缩进（不应该发生，但作为保护）
+            relative_indent = ""
+        
+        # 新的缩进 = 目标缩进（冲突块内部第一行代码的缩进）+ 相对缩进
+        new_indent = target_indent + relative_indent
+        
+        # 组合新行
+        adjusted_lines.append(new_indent + line.lstrip())
+    
+    return '\n'.join(adjusted_lines)
+
+
+def resolve_conflict_with_indent_preservation(section, model="gpt-4o", config=None):
+    """
+    解决单个冲突，明确要求AI保持原始缩进
+    """
+    from reconcile import _get_openai_client
+    import time
+    import logging
+    
+    logger = logging.getLogger('reconcile')
+    
+    # 从冲突块中提取缩进信息
+    conflict_indent = extract_indent_from_conflict(section)
+    
+    # 构建增强的提示词，明确要求保持缩进
+    prompt = f"""Please resolve this Git merge conflict by providing clean, working code without any conflict markers.
+
+CRITICAL REQUIREMENTS:
+1. Maintain the EXACT indentation level shown in the conflict block
+2. Do NOT add any new code, imports, variables, or functions not present in the conflict block
+3. Only merge the existing code from HEAD and the merge branch
+4. Preserve the original code structure and formatting
+5. Return ONLY the resolved code, no explanations, comments, markdown, lists, or bullet points
+
+The conflict shows two different versions of the code:
+- The HEAD version (current branch)  
+- The feature branch version
+
+Please analyze both versions and provide the best merged result that:
+1. Preserves the intent of both changes when possible
+2. Removes all conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch)
+3. Results in syntactically correct, working code
+4. Follows the coding style and patterns evident in the code
+5. Maintains the EXACT indentation shown in the conflict block
+
+Conflict to resolve:
+```
+{section}
+```
+
+Please respond with ONLY the resolved code, no explanations or markdown formatting. The indentation must match the original conflict block."""
+
+    try:
+        client = _get_openai_client(config)
+        
+        start_time = time.time()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant specialized in resolving Git merge conflicts. You must preserve the exact indentation from the original conflict block."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        
+        latency = time.time() - start_time
+        resolved = response.choices[0].message.content.strip()
+        
+        logger.info(
+            f"Resolved conflict section in {latency:.2f}s",
+            extra={'latency': latency, 'model': model}
+        )
+        
+        return resolved
+    except Exception as e:
+        logger.error(
+            f"Failed to resolve conflict: {e}",
+            extra={'error': str(e)}
+        )
+        return section
+
+
+def resolve_conflicts_batch_with_indent_preservation(sections, model="gpt-4o", max_batch_size=5, config=None):
+    """
+    批量解决冲突，明确要求AI保持原始缩进
+    """
+    from reconcile import _get_openai_client
+    import time
+    import logging
+    
+    logger = logging.getLogger('reconcile')
+    
+    if not sections:
+        return []
+    
+    all_resolutions = []
+    
+    # 为每个冲突提取缩进信息
+    indent_info = []
+    for section in sections:
+        indent = extract_indent_from_conflict(section)
+        indent_info.append(indent)
+    
+    # 处理批次
+    for i in range(0, len(sections), max_batch_size):
+        batch = sections[i:i + max_batch_size]
+        batch_indents = indent_info[i:i + max_batch_size]
+        batch_num = (i // max_batch_size) + 1
+        total_batches = (len(sections) + max_batch_size - 1) // max_batch_size
+        
+        logger.info(
+            f"Processing batch {batch_num}/{total_batches} ({len(batch)} conflicts)",
+            extra={
+                'batch_number': batch_num,
+                'total_batches': total_batches,
+                'batch_size': len(batch)
+            }
+        )
+        
+        # 构建批量提示词
+        batch_prompt = """Please resolve these Git merge conflicts by providing clean, working code without any conflict markers.
+
+CRITICAL REQUIREMENTS FOR EACH CONFLICT:
+1. Maintain the EXACT indentation level shown in each conflict block
+2. Do NOT add any new code, imports, variables, or functions not present in the conflict block
+3. Only merge the existing code from HEAD and the merge branch
+4. Preserve the original code structure and formatting
+5. Return ONLY the resolved code, no explanations, comments, markdown, lists, or bullet points
+
+For each conflict, analyze both versions and provide the best merged result that:
+1. Preserves the intent of both changes when possible
+2. Removes all conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch)
+3. Results in syntactically correct, working code
+4. Follows the coding style and patterns evident in the code
+5. Maintains the EXACT indentation shown in each conflict block
+
+Please respond with each resolution numbered and clearly separated like this:
+
+RESOLUTION 1:
+[resolved code for conflict 1]
+
+RESOLUTION 2:
+[resolved code for conflict 2]
+
+And so on...
+
+Here are the conflicts to resolve:
+
+"""
+        
+        for j, section in enumerate(batch, 1):
+            batch_prompt += f"\n=== CONFLICT {j} ===\n{section}\n"
+        
+        try:
+            client = _get_openai_client(config)
+            
+            start_time = time.time()
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant specialized in resolving Git merge conflicts. You must preserve the exact indentation from each original conflict block."},
+                    {"role": "user", "content": batch_prompt}
+                ],
+                temperature=0
+            )
+            
+            latency = time.time() - start_time
+            resolved_text = response.choices[0].message.content.strip()
+            
+            logger.info(
+                f"Resolved batch {batch_num} in {latency:.2f}s",
+                extra={'batch_number': batch_num, 'latency': latency, 'model': model}
+            )
+            
+            # 解析批量响应
+            batch_resolutions = []
+            parts = re.split(r'RESOLUTION\s+\d+:', resolved_text, flags=re.IGNORECASE)
+            
+            for part in parts[1:]:  # 跳过第一个空部分
+                cleaned = part.strip()
+                # 移除可能的markdown代码块标记
+                if cleaned.startswith('```'):
+                    lines = cleaned.split('\n')
+                    if len(lines) > 1 and lines[0].startswith('```'):
+                        cleaned = '\n'.join(lines[1:])
+                    if cleaned.endswith('```'):
+                        cleaned = cleaned[:-3].rstrip()
+                batch_resolutions.append(cleaned)
+            
+            # 如果解析失败，尝试其他方法
+            if len(batch_resolutions) != len(batch):
+                # 尝试按冲突数量分割
+                if len(batch) == 1:
+                    batch_resolutions = [resolved_text]
+                else:
+                    # 简单分割（可能不准确，但作为备选）
+                    batch_resolutions = [resolved_text] * len(batch)
+            
+            all_resolutions.extend(batch_resolutions)
+            
+        except Exception as e:
+            logger.error(
+                f"Batch resolution failed: {e}",
+                extra={'batch_number': batch_num, 'error': str(e)}
+            )
+            # 回退到单个解决
+            for section in batch:
+                try:
+                    resolved = resolve_conflict_with_indent_preservation(section, model=model, config=config)
+                    all_resolutions.append(resolved)
+                except Exception:
+                    all_resolutions.append(section)
+    
+    return all_resolutions
+
+
 def remove_duplicate_lines(content, context_lines=3):
     """
     移除连续的重复代码行
@@ -772,6 +1273,85 @@ def apply_resolutions_safe(file_path, original_content, resolved_map):
                     break
         
         if resolved:
+            # 打印AI返回的原始代码（清理后）
+            print(f"\n   📝 AI返回的代码（清理后，调整缩进前）:")
+            print("   " + "=" * 60)
+            for i, line in enumerate(resolved.split('\n'), 1):
+                # 显示缩进（用·表示空格，用→表示tab）
+                display_line = line.replace(' ', '·').replace('\t', '→')
+                print(f"   {i:3d}: {display_line}")
+            print("   " + "=" * 60)
+            
+            # 优先从冲突块内部提取缩进（更可靠）
+            conflict_indent = extract_indent_from_conflict(conflict_text)
+            
+            # 如果冲突块内部没有缩进，才从上下文提取
+            if not conflict_indent:
+                base_indent, indent_unit, indent_size = extract_indent_from_context(
+                    updated, conflict_start, conflict_end
+                )
+                target_indent = base_indent
+                # 如果上下文也提取不到，使用默认值（4个空格）
+                if not target_indent:
+                    target_indent = '    '  # 4个空格
+                    indent_unit = '    '
+                    indent_size = 4
+            else:
+                # 从冲突块内部提取缩进信息
+                if conflict_indent.startswith('\t'):
+                    indent_unit = '\t'
+                    indent_size = 1
+                else:
+                    # 计算空格数量，找出最常见的缩进单位
+                    spaces = len(conflict_indent)
+                    for unit in [2, 4, 8]:
+                        if spaces % unit == 0:
+                            indent_unit = ' ' * unit
+                            indent_size = unit
+                            break
+                    else:
+                        indent_unit = ' ' * 4
+                        indent_size = 4
+                target_indent = conflict_indent
+            
+            # 确保target_indent不为空
+            if not target_indent:
+                target_indent = '    '  # 默认4个空格
+                indent_unit = '    '
+                indent_size = 4
+            
+            # 检查原始冲突块中所有代码行的缩进是否都是同一级别
+            same_indent_level, conflict_first_indent = check_conflict_lines_same_indent_level(conflict_text)
+            
+            # 提取原始冲突块中所有代码行的缩进
+            conflict_line_indents = extract_conflict_line_indents(conflict_text)
+            
+            print(f"   🔍 目标缩进: {repr(target_indent)} (长度: {len(target_indent)})")
+            print(f"   🔍 原始冲突块所有行是否同一级别: {same_indent_level}")
+            if conflict_line_indents:
+                print(f"   🔍 原始冲突块缩进级别: {[repr(indent) for _, indent in conflict_line_indents]}")
+            
+            # 调整AI返回代码的缩进以匹配目标缩进
+            # 如果原始冲突块中所有行都是同一级别，不保持相对缩进
+            # 否则，使用原始冲突块的缩进级别来调整
+            resolved = normalize_indent_to_target(
+                resolved, 
+                target_indent, 
+                indent_unit, 
+                indent_size, 
+                preserve_relative_indent=not same_indent_level,
+                conflict_line_indents=conflict_line_indents if not same_indent_level else None
+            )
+            
+            # 打印调整缩进后的代码
+            print(f"\n   📝 AI返回的代码（调整缩进后）:")
+            print("   " + "=" * 60)
+            for i, line in enumerate(resolved.split('\n'), 1):
+                # 显示缩进（用·表示空格，用→表示tab）
+                display_line = line.replace(' ', '·').replace('\t', '→')
+                print(f"   {i:3d}: {display_line}")
+            print("   " + "=" * 60)
+            
             # 替换冲突标记
             updated = updated[:conflict_start] + resolved + updated[conflict_end:]
             replaced_count += 1
@@ -1126,12 +1706,13 @@ def main():
                 failed_files.append(path)
                 continue
             
-            # 批量解决冲突
+            # 批量解决冲突（使用缩进保持版本）
             try:
-                resolved_sections = resolve_conflict_sections_batch(
+                resolved_sections = resolve_conflicts_batch_with_indent_preservation(
                     complete_sections,
                     model=final_model,
-                    max_batch_size=max_batch_size
+                    max_batch_size=max_batch_size,
+                    config=config
                 )
                 cleaned_sections = []
                 for i, rs in enumerate(resolved_sections):
@@ -1162,7 +1743,7 @@ def main():
                 resolved_map = {}
                 for sec in complete_sections:
                     try:
-                        merged = resolve_conflict_section_single(sec, model=final_model)
+                        merged = resolve_conflict_with_indent_preservation(sec, model=final_model, config=config)
                         cleaned = clean_ai_response(merged)
                         if cleaned is None or not validate_resolution(sec, cleaned):
                             print(f"   ⚠️  此冲突的解决方案无效，将跳过（保留原始冲突标记）")
